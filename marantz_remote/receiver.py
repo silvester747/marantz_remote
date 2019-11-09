@@ -97,7 +97,7 @@ class BooleanControl(Control):
 class NumericControl(Control):
     format_string: str
 
-    def __init__(self, digits: int = 2, *args, **kwargs):
+    def __init__(self, *args, digits: int = 2, **kwargs):
         super().__init__(*args, **kwargs)
         self.format = f"0{digits}"
 
@@ -152,7 +152,7 @@ class AudioInputSignal(object):
     HDMI = "HDMI"
     Digital = "DIGITAL"
     Analog = "ANALOG"
-    7dot1 "7.1IN"
+    Ch7dot1 = "7.1IN"
 
 
 class AutoStandby(object):
@@ -240,6 +240,7 @@ class Receiver(ReceiverBase):
     sleep_timer = Control("SLP")
 
 
+"""
 r = Receiver("172.16.10.106")
 print(f"Power: {r.power}")
 print(f"Main zone power: {r.main_zone_power}")
@@ -256,3 +257,4 @@ r.master_volume = "+"
 print(r.master_volume)
 r.master_volume = "-"
 print(r.master_volume)
+"""
