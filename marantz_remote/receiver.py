@@ -6,7 +6,7 @@ import re
 
 from enum import Enum
 from telnetlib import Telnet
-from typing import Any, List, Optional, Pattern, Type
+from typing import Any, List, Match, Optional, Pattern, Tuple, Type
 
 
 class StatusError(Exception):
@@ -25,21 +25,20 @@ class ReceiverConnection(object):
     def __del__(self):
         self.connection.close()
 
-    def get(self, command: bytes, responses: List[Pattern]) -> bytes:
+    def get(self, command: bytes, responses: List[Pattern]) -> Tuple[int, Optional[Match[bytes]], bytes]:
         self.connection.write(command)
         return self.connection.expect(responses, self.timeout)
 
     def get_status(self, command: str, response_pattern: str, group: int = 1) -> str:
-        command = command.encode("ascii")
         response = re.compile(f"{response_pattern}\r".encode("ascii"))
 
-        _, match, _ = self.get(command, [response])
+        _, match, _ = self.get(command.encode("ascii"), [response])
         if match:
             return match.group(group).decode("ascii")
         else:
             raise StatusError
 
-    def write(self, command: str):
+    def write(self, command: str) -> None:
         self.connection.write(command.encode("ascii"))
 
 
@@ -51,16 +50,20 @@ class ReceiverBase(object):
 
 
 class Control(object):
+    status_command: str
+    response_pattern: str
+    set_command: str
+
     def __init__(self, name: str, status_command: Optional[str] = None,
                  response_prefix: Optional[str] = None, set_command: Optional[str] = None):
         self.status_command = status_command or f"{name}?"
         self.response_pattern = self._response_pattern(response_prefix or name)
         self.set_command = set_command or name
 
-    def _response_pattern(self, response_prefix: str):
+    def _response_pattern(self, response_prefix: str) -> str:
         return f"{response_prefix}(.*)"
 
-    def __get__(self, instance: ReceiverBase, owner=None) -> str:
+    def __get__(self, instance: ReceiverBase, owner=None) -> Any:
         return instance.connection.get_status(self.status_command, self.response_pattern)
 
     def __set__(self, instance: ReceiverBase, value: Any) -> None:
@@ -104,7 +107,7 @@ class NumericControl(Control):
             raise ValueError
         super().__set__(instance, f"{value:{self.format_string}}")
 
-    def _response_pattern(self, response_prefix: str):
+    def _response_pattern(self, response_prefix: str) -> str:
         return f"{response_prefix}(\\s*\\d+)"
 
     def __get__(self, instance: ReceiverBase, owner=None) -> int:
