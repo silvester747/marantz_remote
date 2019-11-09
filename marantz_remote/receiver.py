@@ -4,8 +4,9 @@
 
 import re
 
+from enum import Enum
 from telnetlib import Telnet
-from typing import Any, List, Optional, Pattern
+from typing import Any, List, Optional, Pattern, Type
 
 
 class StatusError(Exception):
@@ -72,40 +73,39 @@ class Control(object):
         pass
 
 
-class BooleanControl(Control):
-    def _response_pattern(self, response_prefix: str):
-        return f"{response_prefix}(ON|OFF)"
+class EnumControl(Control):
+    enum_type: Type[Enum]
 
-    def __get__(self, instance: ReceiverBase, owner=None) -> bool:
-        return self._to_bool(super().__get__(instance, owner))
+    def __init__(self, *args, enum_type: Type[Enum], **kwargs):
+        super().__init__(*args, **kwargs)
+        self.enum_type = enum_type
 
-    def __set__(self, instance: ReceiverBase, value: bool) -> None:
-        super().__set__(instance, self._from_bool(value))
+    def __get__(self, instance: ReceiverBase, owner=None) -> Enum:
+        try:
+            return self.enum_type(super().__get__(instance, owner))
+        except ValueError:
+            raise StatusError
 
-    @staticmethod
-    def _to_bool(text: str) -> bool:
-        return text.lower() == "on"
-
-    @staticmethod
-    def _from_bool(value: str) -> str:
-        if value:
-            return "ON"
-        else:
-            return "OFF"
+    def __set__(self, instance: ReceiverBase, value: Enum) -> None:
+        super().__set__(instance, value.value)
 
 
 class NumericControl(Control):
     format_string: str
+    digits: int
 
     def __init__(self, *args, digits: int = 2, **kwargs):
         super().__init__(*args, **kwargs)
-        self.format = f"0{digits}"
+        self.format_string = f"0{digits}"
+        self.digits = digits
 
-    def __set__(self, instance: ReceiverBase, value: bool) -> None:
+    def __set__(self, instance: ReceiverBase, value: int) -> None:
+        if value < 0 or value >= 10 ** self.digits:
+            raise ValueError
         super().__set__(instance, f"{value:{self.format_string}}")
 
     def _response_pattern(self, response_prefix: str):
-        return f"{response_prefix}(\s*\d+)"
+        return f"{response_prefix}(\\s*\\d+)"
 
     def __get__(self, instance: ReceiverBase, owner=None) -> int:
         return int(super().__get__(instance, owner))
@@ -114,13 +114,14 @@ class NumericControl(Control):
 class VolumeControl(NumericControl):
     def __set__(self, instance: ReceiverBase, value: Any) -> None:
         if value == "+":
-            value = "UP"
+            Control.__set__(self, instance, "UP")
         elif value == "-":
-            value = "DOWN"
-        super().__set__(instance, value)
+            Control.__set__(self, instance, "DOWN")
+        else:
+            super().__set__(instance, value)
 
 
-class InputSource(object):
+class InputSource(Enum):
     Phono = "PHONO"
     CD = "CD"
     DVD = "DVD"
@@ -145,32 +146,41 @@ class InputSource(object):
     Aux7 = "AUX7"
     OnlineMusic = "NET"
     Bluetooth = "BT"
+    On = "ON"
+    Off = "OFF"
 
 
-class AudioInputSignal(object):
+class AudioInputSignal(Enum):
     Auto = "AUTO"
     HDMI = "HDMI"
     Digital = "DIGITAL"
     Analog = "ANALOG"
     Ch7dot1 = "7.1IN"
+    ARC = "ARC"
+    No = "NO"
 
 
-class AutoStandby(object):
+class AutoStandby(Enum):
     Off = "OFF"
     In15Minutes = "15M"
     In30Minutes = "30M"
     In60Minutes = "60M"
 
 
-class EcoMode(object):
+class EcoMode(Enum):
     Off = "OFF"
     On = "ON"
     Auto = "AUTO"
 
 
+class Power(Enum):
+    Off = "OFF"
+    On = "ON"
+
+
 class Receiver(ReceiverBase):
-    power = BooleanControl("PW")
-    main_zone_power = BooleanControl("ZM")
+    power = EnumControl("PW", enum_type=Power)
+    main_zone_power = EnumControl("ZM", enum_type=Power)
 
     master_volume = VolumeControl("MV")
 
@@ -207,13 +217,11 @@ class Receiver(ReceiverBase):
     def channel_volume_factory_reset(self) -> None:
         self.connection.write("CVZRL")
 
-    mute = BooleanControl("MU")
-
-    # Supported input: InputSource
-    input_source = Control("SI")
+    mute = EnumControl("MU", enum_type=Power)
+    input_source = EnumControl("SI", enum_type=InputSource)
 
     # Supported input: 0-5
-    smart_select = NumericControl("MSSMART", status_command="MSSMART ?")
+    smart_select = NumericControl("MSSMART", status_command="MSSMART ?", digits=1)
 
     def smart_select_memory(self, nr: int) -> None:
         """
@@ -224,37 +232,31 @@ class Receiver(ReceiverBase):
     def smart_select_cancel(self) -> None:
         self.smart_select = 0
 
-    # Supported input: AudioSignal
-    audio_input_signal = Control("SD")
-
-    # Supported input: InputSource, "ON", "OFF"
-    video_select = Control("SV")
-
-    # Supported input: AutoStandby
-    auto_standby = Control("STBY")
-
-    # Supported input: EcoMode
-    eco_mode = Control("ECO")
+    audio_input_signal = EnumControl("SD", enum_type=AudioInputSignal)
+    video_select = EnumControl("SV", enum_type=InputSource)
+    auto_standby = EnumControl("STBY", enum_type=AutoStandby)
+    eco_mode = EnumControl("ECO", enum_type=EcoMode)
 
     # Supported input: ### or OFF
     sleep_timer = Control("SLP")
 
 
-"""
-r = Receiver("172.16.10.106")
-print(f"Power: {r.power}")
-print(f"Main zone power: {r.main_zone_power}")
-print(f"Master volume: {r.master_volume}")
-print(f"Input source: {r.input_source}")
-print(f"Smart select: {r.smart_select}")
-print(f"Front left: {r.channel_volume_front_left}")
-print(f"Front right: {r.channel_volume_front_right}")
-print(f"Center: {r.channel_volume_center}")
-print(f"Mute: {r.mute}")
-print(f"Audio input signal: {r.audio_input_signal}")
+def test() -> None:
+    r = Receiver("172.16.10.106")
 
-r.master_volume = "+"
-print(r.master_volume)
-r.master_volume = "-"
-print(r.master_volume)
-"""
+    for name in dir(r):
+        if not name.startswith("_"):
+            try:
+                attr = getattr(r, name)
+                if not callable(attr):
+                    print(f"{name}: {attr}")
+            except StatusError:
+                print(f"{name} not supported")
+
+    r.master_volume = "+"
+    print(r.master_volume)
+    r.master_volume = "-"
+    print(r.master_volume)
+
+if __name__ == "__main__":
+    test()

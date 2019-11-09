@@ -7,10 +7,12 @@ Test the receiver interface
 
 import pytest
 
+from enum import Enum
 from typing import List, Pattern
 from unittest.mock import MagicMock
 
-from marantz_remote.receiver import BooleanControl, Control, ReceiverConnection, StatusError
+from marantz_remote.receiver import (Control, EnumControl, NumericControl, ReceiverConnection,
+                                     StatusError, VolumeControl)
 
 
 class MockTelnet(object):
@@ -132,32 +134,111 @@ def test_control__ignore_other_responses():
     assert parent.control == "OFF"
 
 
-def test_booleancontrol():
+def test_numericcontrol():
     class TestParent(object):
         connection = MockReceiverConnection()
-        control = BooleanControl("PW")
+        control = NumericControl("MV")
 
     parent = TestParent()
-    parent.connection.set_response("PW?", "PWOFF")
-    assert parent.control == False
+    parent.connection.set_response("MV?", "MV50")
+    assert parent.control == 50
 
-    parent.connection.set_response("PW?", "PWON")
-    assert parent.control == True
+    parent.connection.set_response("MV?", "MV70")
+    assert parent.control == 70
 
-    parent.control = True
-    assert parent.connection.has_written("PWON")
+    parent.control = 4
+    assert parent.connection.has_written("MV04")
 
-    parent.control = False
-    assert parent.connection.has_written("PWOFF")
+    parent.control = 38
+    assert parent.connection.has_written("MV38")
 
 
-def test_booleancontrol__invalidresponse():
+def test_numericcontrol__invalid_response():
     class TestParent(object):
         connection = MockReceiverConnection()
-        control = BooleanControl("PW")
+        control = NumericControl("MV")
 
     parent = TestParent()
-    parent.connection.set_responses("PW?", ["PWO", "PWTRUE", "PWFALSE", "PW0", "PW1"])
+    parent.connection.set_responses("MV?", ["MVO", "MVTRUE", "MVFALSE", "MV", "MVB30"])
     with pytest.raises(StatusError):
-        assert parent.control == False
+        assert parent.control == 1
 
+
+def test_numericcontrol__invalid_input():
+    class TestParent(object):
+        connection = MockReceiverConnection()
+        control = NumericControl("MV")
+
+    parent = TestParent()
+    with pytest.raises(ValueError):
+        parent.control = -1
+    with pytest.raises(ValueError):
+        parent.control = 100
+
+
+def test_numericcontrol__more_digits():
+    class TestParent(object):
+        connection = MockReceiverConnection()
+        control = NumericControl("MV", digits=4)
+
+    parent = TestParent()
+    parent.connection.set_response("MV?", "MV0050")
+    assert parent.control == 50
+
+    parent.connection.set_response("MV?", "MV0700")
+    assert parent.control == 700
+
+    parent.control = 4
+    assert parent.connection.has_written("MV0004")
+
+    parent.control = 38
+    assert parent.connection.has_written("MV0038")
+
+    parent.control = 210
+    assert parent.connection.has_written("MV0210")
+
+    parent.control = 3233
+    assert parent.connection.has_written("MV3233")
+
+
+def test_volumecontrol():
+    class TestParent(object):
+        connection = MockReceiverConnection()
+        control = VolumeControl("MV")
+
+    parent = TestParent()
+
+    parent.control = "+"
+    assert parent.connection.has_written("MVUP")
+
+    parent.control = "-"
+    assert parent.connection.has_written("MVDOWN")
+
+
+def test_enumcontrol():
+    class TestEnum(Enum):
+        Auto = "AUTO"
+        HDMI = "HDMI"
+        Digital = "DIGITAL"
+
+
+    class TestParent(object):
+        connection = MockReceiverConnection()
+        control = EnumControl("SD", enum_type=TestEnum)
+
+    parent = TestParent()
+    parent.connection.set_response("SD?", "SDAUTO")
+    assert parent.control == TestEnum.Auto
+
+    parent.connection.set_response("SD?", "SDHDMI")
+    assert parent.control == TestEnum.HDMI
+
+    parent.connection.set_response("SD?", "SDDIGITAL")
+    assert parent.control == TestEnum.Digital
+
+    parent.connection.set_response("SD?", "SDNO")
+    with pytest.raises(StatusError):
+        assert parent.control == TestEnum.Auto
+
+    parent.control = TestEnum.Auto
+    assert parent.connection.has_written("SDAUTO")
