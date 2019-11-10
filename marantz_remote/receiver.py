@@ -149,6 +149,8 @@ class InputSource(Enum):
     Aux7 = "AUX7"
     OnlineMusic = "NET"
     Bluetooth = "BT"
+
+    # Only for Video Select
     On = "ON"
     Off = "OFF"
 
@@ -158,7 +160,9 @@ class AudioInputSignal(Enum):
     HDMI = "HDMI"
     Digital = "DIGITAL"
     Analog = "ANALOG"
-    Ch7dot1 = "7.1IN"
+    Ch7_1 = "7.1IN"
+
+    # Return value only
     ARC = "ARC"
     No = "NO"
 
@@ -181,10 +185,103 @@ class Power(Enum):
     On = "ON"
 
 
+class SurroundMode(Enum):
+    # Settable values
+    Movie = "MOVIE"
+    Music = "MUSIC"
+    Game = "GAME"
+    Direct = "DIRECT"
+    PureDirect = "PURE DIRECT"
+    Stereo = "STEREO"
+    Auto = "AUTO"
+    DolbyDigital = "DOLBY DIGITAL"
+    DtsSurround = "DTS SURROUND"
+    Auro3D = "AURO3D"
+    Auro2DSurround = "AURO2DSURR"
+    MultiChannelStereo = "MCH STEREO"
+    Virtual = "VIRTUAL"
+
+    # Rotate between options
+    Left = "LEFT"
+    Right = "RIGHT"
+
+    # Return only
+    # TODO: Split combined modes
+    DolbySurround = "DOLBY SURROUND"
+    DolbyAtmos = "DOLBY ATMOS"
+    DolbyDigitalDS = "DOLBY D+DS"
+    DolbyDigitalNeuralX = "DOLBY D+NEURAL:X"
+    DolbyDigitalPlus = "DOLBY D+"
+    DolbyDigitalPlusDS = "DOLBY D+ +DS"
+    DolbyDigitalPlusNeuralX = "DOLBY D+ +NEURAL:X"
+    DolbyHD = "DOLBY HD"
+    DolbyHDDS = "DOLBY HD+DS"
+    DolbyHDNeuralX = "DOLBY HD+NEURAL:X"
+    NeuralX = "NEURAL:X"
+    DtsEsDscrt6_1 = "DTS ES DSCRT6.1"
+    DtsEsMtrx6_1 = "DTS ES MTRX6.1"
+    DtsDS = "DTS+DS"
+    DtsNeuralX = "DTS+NEURAL:X"
+    DtsEsMtrxNeuralX = "DTS ES MTRX+NEURAL:X"
+    DtsEsDscrtNeuralX = "DTS ES DSCRT+NEURAL:X"
+    Dts96_24 = "DTS96/24"
+    Dts96EsMtrx = "DTS96 ES MTRX"
+    DtsHD = "DTS HD"
+    DtsHDMstr = "DTS HD MSTR"
+    DtsHDDS = "MSDTS HD+DS"
+    DtsHDNeuralX = "DTS HD+NEURAL:X"
+    DtsX = "DTS:X"
+    DtsXMstr = "DTS:X MSTR"
+    DtsExpress = "DTS EXPRESS"
+    DtsES8ChDscrt = "DTS ES 8CH DSCRT"
+    MultiChIn = "MULTI CH IN"
+    MultiChInDS = "M CH IN+DS"
+    MultiChInNeuralX = "M CH IN+NEURAL:X"
+    MultiChIn7_1 = "MULTI CH IN 7.1"
+
+
+class Aspect(Enum):
+    Normal = "NRM"
+    Full = "FUL"
+
+
+class HdmiMonitor(Enum):
+    Auto = "AUTO"
+    Out1 = "1"
+    Out2 = "2"
+
+
+class HdmiResolution(Enum):
+    Resolution480p576p = "48P"
+    Resolution1080i = "10I"
+    Resolution720p = "72P"
+    Resolution1080p = "10P"
+    Resolution1080p24Hz = "10P24"
+    Resolution4K = "4K"
+    Resolution4K60_50 = "4KF"
+    Auto = "AUTO"
+
+
+class HdmiAudioDecode(Enum):
+    Amp = "AMP"
+    TV = "TV"
+
+
+class VideoProcess(Enum):
+    Auto = "AUTO"
+    Game = "GAME"
+    Movie = "MOVI"
+
 class Receiver(ReceiverBase):
+    #
+    # Main Zone - Power
+    #
     power = EnumControl("PW", enum_type=Power)
     main_zone_power = EnumControl("ZM", enum_type=Power)
 
+    #
+    # Main Zone - Volume setting
+    #
     master_volume = VolumeControl("MV")
 
     channel_volume_front_left = VolumeControl("CVFL", status_command="CV?", set_command="CVFL ")
@@ -221,6 +318,10 @@ class Receiver(ReceiverBase):
         self.connection.write("CVZRL")
 
     mute = EnumControl("MU", enum_type=Power)
+
+    #
+    # Main Zone - Input setting
+    #
     input_source = EnumControl("SI", enum_type=InputSource)
 
     # Supported input: 0-5
@@ -237,11 +338,44 @@ class Receiver(ReceiverBase):
 
     audio_input_signal = EnumControl("SD", enum_type=AudioInputSignal)
     video_select = EnumControl("SV", enum_type=InputSource)
+
+    #
+    # Main Zone - Auto Standby
+    #
     auto_standby = EnumControl("STBY", enum_type=AutoStandby)
+
+    #
+    # Main Zone - ECO
+    #
     eco_mode = EnumControl("ECO", enum_type=EcoMode)
 
+    #
+    # Main Zone - Sleep
     # Supported input: ### or OFF
     sleep_timer = Control("SLP")
+
+    #
+    # Main Zone - Surround
+    #
+    surround_mode = EnumControl("MS", enum_type=SurroundMode)
+
+    #
+    # Main Zone - Aspect
+    #
+    aspect = EnumControl("VSASP", enum_type=Aspect)
+
+    #
+    # Main Zone - HDMI Setting
+    #
+    hdmi_monitor = EnumControl("VSMONI", enum_type=HdmiMonitor)
+    hdmi_output = EnumControl("VSSC", enum_type=HdmiResolution)
+    hdmi_resolution = EnumControl("VSSCH", enum_type=HdmiResolution)
+    hdmi_audio_decode = EnumControl("VSAUDIO ", enum_type=HdmiAudioDecode)
+
+    #
+    # Main Zone - Video Process
+    #
+    video_process = EnumControl("VSVPM", status_command="VSVPM ?", enum_type=VideoProcess)
 
 
 def test() -> None:
