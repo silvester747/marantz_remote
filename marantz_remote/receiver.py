@@ -3,77 +3,129 @@
 """Main module."""
 
 import re
+import sys
 
 from enum import Enum
 from telnetlib import Telnet
-from typing import Any, List, Match, Optional, Pattern, Tuple, Type
+from typing import Any, List, Match, MutableMapping, Optional, Pattern, Tuple, Type
+
+from twisted.conch.telnet import StatefulTelnetProtocol
+from twisted.internet import reactor
+from twisted.internet.defer import Deferred
+from twisted.internet.protocol import Protocol
+from twisted.internet.endpoints import TCP4ClientEndpoint, connectProtocol
 
 
-class StatusError(Exception):
+class NotConnectedError(Exception):
     def __str__(self) -> str:
-        return "Failed to retreive status. Your receiver may not support this feature."
+        return "Not connected"
 
 
-class ReceiverConnection(object):
-    connection: Telnet
-    timeout: int
+class ReceiverProtocol(StatefulTelnetProtocol):
+    delimiter = b"\r"
 
-    def __init__(self, host: str, timeout: int = 1):
-        self.connection = Telnet(host=host)
-        self.timeout = timeout
+    receiver: "ReceiverBase"
 
-    def __del__(self):
-        self.connection.close()
+    def __init__(self, receiver: "ReceiverBase"):
+        self.receiver = receiver
 
-    def get(self, command: bytes, responses: List[Pattern]) -> Tuple[int, Optional[Match[bytes]], bytes]:
-        self.connection.write(command)
-        return self.connection.expect(responses, self.timeout)
+    def connectionLost(self, reason):
+        print("Connection lost", file=sys.stderr)
 
-    def get_status(self, command: str, response_pattern: str, group: int = 1) -> str:
-        response = re.compile(f"{response_pattern}\r".encode("ascii"))
-
-        _, match, _ = self.get(command.encode("ascii"), [response])
-        if match:
-            return match.group(group).decode("ascii")
-        else:
-            raise StatusError
-
-    def write(self, command: str) -> None:
-        self.connection.write(command.encode("ascii"))
+    def lineReceived(self, line):
+        self.receiver.parse(line.decode("ascii"))
 
 
 class ReceiverBase(object):
-    connection: ReceiverConnection
+    response_handlers: List[Tuple[Pattern, "Control"]]
+    cached_values: MutableMapping[str, Any]
+    protocol: Optional[ReceiverProtocol] = None
+    connected: Deferred
 
     def __init__(self, host: str, timeout: int = 1):
-        self.connection = ReceiverConnection(host, timeout)
+        self.cached_values = {}
+        self.connect(host)
+
+    def connect(self, host: str):
+        endpoint = TCP4ClientEndpoint(reactor, host, 23)
+        protocol = ReceiverProtocol(self)
+        self.connected = connectProtocol(endpoint, protocol)
+        self.connected.addCallback(self._connected)
+
+    def write(self, command: str) -> None:
+        if self.protocol is None:
+            raise NotConnectedError
+
+        self.protocol.sendLine(command.encode("ascii"))
+
+    def _connected(self, protocol):
+        print("Connected!")
+        self.protocol = protocol
+
+    def parse(self, line):
+        handled = False
+        for pattern, control in self.response_handlers:
+            match = pattern.match(line)
+            if match:
+                control.parse(self, match)
+                handled = True
+        if not handled:
+            print(f"Unhandled response: {line}", file=sys.stderr)
 
 
 class Control(object):
+    name: str
     status_command: str
+    response_prefix: str
     response_pattern: str
     set_command: str
 
     def __init__(self, name: str, status_command: Optional[str] = None,
                  response_prefix: Optional[str] = None, set_command: Optional[str] = None):
+        self.name = name
         self.status_command = status_command or f"{name}?"
-        self.response_pattern = self._response_pattern(response_prefix or name)
+        self.response_prefix = response_prefix or name
+        self.response_pattern = self._response_pattern(self.response_prefix)
         self.set_command = set_command or name
+        self.deferreds = []
 
     def _response_pattern(self, response_prefix: str) -> str:
         return f"{response_prefix}(.*)"
 
-    def __get__(self, instance: ReceiverBase, owner=None) -> Any:
-        return instance.connection.get_status(self.status_command, self.response_pattern)
+    def __get__(self, instance: ReceiverBase, owner=None) -> Deferred:
+        d = Deferred()
+        value = instance.cached_values.get(self.name, None)
+        if value:
+            d.callback(value)
+        else:
+            instance.write(self.status_command)
+            self.deferreds.append(d)
+        return d
 
     def __set__(self, instance: ReceiverBase, value: Any) -> None:
-        instance.connection.write(f"{self.set_command}{value}")
+        instance.write(f"{self.set_command}{value}")
 
     def __delete__(self, instance: ReceiverBase):
         pass
 
     def __set_name__(self, owner, name):
-        pass
+        if not hasattr(owner, "response_handlers"):
+            owner.response_handlers = []
+        owner.response_handlers.append((re.compile(self.response_pattern), self))
+        self.name = name
+
+    def parse(self, instance, match):
+        self.store_value(instance, match.group(1))
+    
+    def store_value(self, instance, value):
+        instance.cached_values[self.name] = value
+        for d in self.deferreds:
+            d.callback(value)
+        self.deferreds.clear()
+
+    def clear_value(self, instance):
+        if self.name in instance.cached_values:
+            del instance.cached_values[self.name]
 
 
 class EnumControl(Control):
@@ -83,14 +135,15 @@ class EnumControl(Control):
         super().__init__(*args, **kwargs)
         self.enum_type = enum_type
 
-    def __get__(self, instance: ReceiverBase, owner=None) -> Enum:
-        try:
-            return self.enum_type(super().__get__(instance, owner))
-        except ValueError:
-            raise StatusError
-
     def __set__(self, instance: ReceiverBase, value: Enum) -> None:
         super().__set__(instance, value.value)
+
+    def parse(self, instance, match):
+        try:
+            self.store_value(instance, self.enum_type(match.group(1)))
+        except ValueError:
+            self.clear_value(instance)
+            print(f"Invalid value: {match.group(1)}", file=sys.stderr)
 
 
 class NumericControl(Control):
@@ -110,8 +163,12 @@ class NumericControl(Control):
     def _response_pattern(self, response_prefix: str) -> str:
         return f"{response_prefix}(\\s*\\d+)"
 
-    def __get__(self, instance: ReceiverBase, owner=None) -> int:
-        return int(super().__get__(instance, owner))
+    def parse(self, instance, match):
+        try:
+            self.store_value(instance, int(match.group(1)))
+        except:
+            print(f"Invalid value: {match.group(1)}", file=sys.stderr)
+            self.clear_value(instance)
 
 
 class VolumeControl(NumericControl):
@@ -183,6 +240,7 @@ class EcoMode(Enum):
 class Power(Enum):
     Off = "OFF"
     On = "ON"
+    StandBy = "STANDBY"
 
 
 class SurroundMode(Enum):
@@ -315,7 +373,7 @@ class Receiver(ReceiverBase):
     channel_volume_top_surround = VolumeControl("CVTS", status_command="CV?", set_command="CVTS ")
 
     def channel_volume_factory_reset(self) -> None:
-        self.connection.write("CVZRL")
+        self.write("CVZRL")
 
     mute = EnumControl("MU", enum_type=Power)
 
@@ -331,7 +389,7 @@ class Receiver(ReceiverBase):
         """
         Supported input: 0-5
         """
-        self.connection.write(f"MSSMART{nr} MEMORY")
+        self.write(f"MSSMART{nr} MEMORY")
 
     def smart_select_cancel(self) -> None:
         self.smart_select = 0
@@ -381,19 +439,27 @@ class Receiver(ReceiverBase):
 def test() -> None:
     r = Receiver("172.16.10.106")
 
-    for name in dir(r):
-        if not name.startswith("_"):
-            try:
-                attr = getattr(r, name)
-                if not callable(attr):
-                    print(f"{name}: {attr}")
-            except StatusError:
-                print(f"{name} not supported")
+    def print_value(value, name):
+        print(f"{name}: {value}")
 
-    r.master_volume = "+"
-    print(r.master_volume)
-    r.master_volume = "-"
-    print(r.master_volume)
+    def print_error(value, name):
+        print(f"{name} not available")
+
+    def run_test(protocol):
+        for name in dir(r):
+            if not name.startswith("_"):
+                attr = getattr(r, name)
+                if isinstance(attr, Deferred):
+                    attr.addTimeout(1, reactor).addCallback(print_value, name).addErrback(print_error, name)
+
+        r.master_volume = "+"
+        print(r.master_volume)
+        r.master_volume = "-"
+        print(r.master_volume)
+
+    r.connected.addCallback(run_test)
+
+    reactor.run()
 
 if __name__ == "__main__":
     test()

@@ -6,215 +6,245 @@ Test the receiver interface
 """
 
 import pytest
+import pytest_twisted
 
 from enum import Enum
 from typing import List, Pattern
+from twisted.internet import reactor
+from twisted.internet.defer import Deferred, TimeoutError
+from twisted.internet.testing import StringTransportWithDisconnection
 from unittest.mock import MagicMock
 
-from marantz_remote.receiver import (Control, EnumControl, NumericControl, ReceiverConnection,
-                                     StatusError, VolumeControl)
+from marantz_remote.receiver import (Control, EnumControl, NumericControl, ReceiverBase,
+                                     ReceiverProtocol, VolumeControl)
 
 
-class MockTelnet(object):
-    def __init__(self, host=None):
-        self.written = []
-        self.expectations = {}
-        self.responses = []
+class MockedConnectionReceiver(ReceiverBase):
+    def connect(self, host: str):
+        protocol = ReceiverProtocol(self)
+        self.transport = StringTransportWithDisconnection()
+        protocol.makeConnection(self.transport)
+        self._connected(protocol)
 
-    def close(self):
-        pass
+    def write_response(self, msg):
+        self.protocol.lineReceived(msg)
 
-    def write(self, buffer: bytes):
-        self.written.append(buffer)
-        if buffer in self.expectations:
-            self.responses.extend(self.expectations[buffer])
-
-    def expect(self, patterns: List[Pattern], timeout: int = None):
-        while self.responses:
-            response = self.responses.pop(0)
-            for i, p in enumerate(patterns):
-                m = p.match(response)
-                if m:
-                    return i, m, response
-        return -1, None, b""
+    def sent(self):
+        data = self.transport.value()
+        self.transport.clear()
+        return data
 
 
-class MockReceiverConnection(ReceiverConnection):
-    def __init__(self):
-        self.connection = MockTelnet()
-        self.timeout = 1
-
-    def has_written(self, message: str) -> bool:
-        return message.encode('ascii') in self.connection.written
-
-    def set_response(self, command: str, response: str) -> None:
-        self.set_responses(command, [response])
-
-    def set_responses(self, command: str, responses: List[str]) -> None:
-        byte_responses = [f"{r}\r".encode("ascii") for r in responses]
-        self.connection.expectations[command.encode("ascii")] = byte_responses
-
-
+@pytest_twisted.inlineCallbacks
 def test_control__name_only():
-    class TestParent(object):
-        connection = MockReceiverConnection()
+    class TestParent(MockedConnectionReceiver):
         control = Control("PW")
 
-    parent = TestParent()
-    parent.connection.set_response("PW?", "PWOFF")
+    parent = TestParent("fakehost")
+    d = parent.control
+    assert parent.sent() == b"PW?\r"
 
-    assert parent.control == "OFF"
+    parent.write_response(b"PWOFF")
+    d.addTimeout(1, reactor)
+    value = yield d
+    assert value == "OFF"
 
     parent.control = "ON"
-    assert parent.connection.has_written("PWON")
+    assert parent.sent() == b"PWON\r"
 
 
+@pytest_twisted.inlineCallbacks
 def test_control__override_status_command():
-    class TestParent(object):
-        connection = MockReceiverConnection()
+    class TestParent(MockedConnectionReceiver):
         control = Control("PW", status_command="PW ?")
 
-    parent = TestParent()
-    parent.connection.set_response("PW ?", "PWOFF")
+    parent = TestParent("fakehost")
+    d = parent.control
+    assert parent.sent() == b"PW ?\r"
 
-    assert parent.control == "OFF"
+    parent.write_response(b"PWOFF")
+    d.addTimeout(1, reactor)
+    value = yield d
+    assert value == "OFF"
 
     parent.control = "ON"
-    assert parent.connection.has_written("PWON")
+    assert parent.sent() == b"PWON\r"
 
 
+@pytest_twisted.inlineCallbacks
 def test_control__override_set_command():
-    class TestParent(object):
-        connection = MockReceiverConnection()
+    class TestParent(MockedConnectionReceiver):
         control = Control("PW", set_command="PWA")
 
-    parent = TestParent()
-    parent.connection.set_response("PW?", "PWOFF")
+    parent = TestParent("fakehost")
+    d = parent.control
+    assert parent.sent() == b"PW?\r"
 
-    assert parent.control == "OFF"
+    parent.write_response(b"PWOFF")
+    d.addTimeout(1, reactor)
+    value = yield d
+    assert value == "OFF"
 
     parent.control = "ON"
-    assert parent.connection.has_written("PWAON")
+    assert parent.sent() == b"PWAON\r"
 
 
+@pytest_twisted.inlineCallbacks
 def test_control__override_response_prefix():
-    class TestParent(object):
-        connection = MockReceiverConnection()
+    class TestParent(MockedConnectionReceiver):
         control = Control("PW", response_prefix="PWA")
 
-    parent = TestParent()
-    parent.connection.set_response("PW?", "PWAOFF")
+    parent = TestParent("fakehost")
+    d = parent.control
+    assert parent.sent() == b"PW?\r"
 
-    assert parent.control == "OFF"
+    parent.write_response(b"PWAOFF")
+    d.addTimeout(1, reactor)
+    value = yield d
+    assert value == "OFF"
 
     parent.control = "ON"
-    assert parent.connection.has_written("PWON")
+    assert parent.sent() == b"PWON\r"
 
 
+@pytest_twisted.inlineCallbacks
 def test_control__incorrect_response():
-    class TestParent(object):
-        connection = MockReceiverConnection()
+    class TestParent(MockedConnectionReceiver):
         control = Control("PW")
 
-    parent = TestParent()
-    parent.connection.set_response("PW?", "RWAUTO")
+    parent = TestParent("fakehost")
+    d = parent.control
+    assert parent.sent() == b"PW?\r"
 
-    with pytest.raises(StatusError):
-        assert parent.control == "OFF"
+    parent.write_response(b"RWAUTO")
+    d.addTimeout(1, reactor)
+
+    with pytest.raises(TimeoutError):
+        yield d
 
 
+@pytest_twisted.inlineCallbacks
 def test_control__ignore_other_responses():
-    class TestParent(object):
-        connection = MockReceiverConnection()
+    class TestParent(MockedConnectionReceiver):
         control = Control("PW")
 
-    parent = TestParent()
-    parent.connection.set_responses("PW?", ["CV20", "MV30", "MUOFF", "PWOFF"])
+    parent = TestParent("fakehost")
+    d = parent.control
+    assert parent.sent() == b"PW?\r"
 
-    assert parent.control == "OFF"
+    parent.write_response(b"CV20")
+    parent.write_response(b"MV30")
+    parent.write_response(b"MUON")
+    parent.write_response(b"PWOFF")
+
+    d.addTimeout(1, reactor)
+    value = yield d
+    assert value == "OFF"
 
 
+@pytest_twisted.inlineCallbacks
 def test_numericcontrol():
-    class TestParent(object):
-        connection = MockReceiverConnection()
+    class TestParent(MockedConnectionReceiver):
         control = NumericControl("MV")
 
-    parent = TestParent()
-    parent.connection.set_response("MV?", "MV50")
-    assert parent.control == 50
+    parent = TestParent("fakehost")
 
-    parent.connection.set_response("MV?", "MV70")
-    assert parent.control == 70
+    d = parent.control
+    assert parent.sent() == b"MV?\r"
+
+    parent.write_response(b"MV50")
+    d.addTimeout(1, reactor)
+    value = yield d
+    assert value == 50
+
+    parent.write_response(b"MV70")
+    d = parent.control
+    assert not parent.sent()
+
+    d.addTimeout(1, reactor)
+    value = yield d
+    assert value == 70
 
     parent.control = 4
-    assert parent.connection.has_written("MV04")
+    assert parent.sent() == b"MV04\r"
 
     parent.control = 38
-    assert parent.connection.has_written("MV38")
+    assert parent.sent() == b"MV38\r"
 
 
+@pytest_twisted.inlineCallbacks
 def test_numericcontrol__invalid_response():
-    class TestParent(object):
-        connection = MockReceiverConnection()
+    class TestParent(MockedConnectionReceiver):
         control = NumericControl("MV")
 
-    parent = TestParent()
-    parent.connection.set_responses("MV?", ["MVO", "MVTRUE", "MVFALSE", "MV", "MVB30"])
-    with pytest.raises(StatusError):
-        assert parent.control == 1
+    parent = TestParent("fakehost")
+
+    d = parent.control
+    assert parent.sent() == b"MV?\r"
+
+    parent.write_response(b"MVO")
+    parent.write_response(b"MVTRUE")
+    parent.write_response(b"MVFALSE")
+    parent.write_response(b"MV")
+    parent.write_response(b"MVB30")
+    d.addTimeout(1, reactor)
+    with pytest.raises(TimeoutError):
+        yield d
 
 
 def test_numericcontrol__invalid_input():
-    class TestParent(object):
-        connection = MockReceiverConnection()
+    class TestParent(MockedConnectionReceiver):
         control = NumericControl("MV")
 
-    parent = TestParent()
+    parent = TestParent("fakehost")
     with pytest.raises(ValueError):
         parent.control = -1
     with pytest.raises(ValueError):
         parent.control = 100
 
 
+@pytest_twisted.inlineCallbacks
 def test_numericcontrol__more_digits():
-    class TestParent(object):
-        connection = MockReceiverConnection()
+    class TestParent(MockedConnectionReceiver):
         control = NumericControl("MV", digits=4)
 
-    parent = TestParent()
-    parent.connection.set_response("MV?", "MV0050")
-    assert parent.control == 50
+    parent = TestParent("fakehost")
 
-    parent.connection.set_response("MV?", "MV0700")
-    assert parent.control == 700
+    parent.write_response(b"MV0050")
+    value = yield parent.control.addTimeout(1, reactor)
+    assert value == 50
+
+    parent.write_response(b"MV0700")
+    value = yield parent.control.addTimeout(1, reactor)
+    assert value == 700
 
     parent.control = 4
-    assert parent.connection.has_written("MV0004")
+    assert parent.sent() == b"MV0004\r"
 
     parent.control = 38
-    assert parent.connection.has_written("MV0038")
+    assert parent.sent() == b"MV0038\r"
 
     parent.control = 210
-    assert parent.connection.has_written("MV0210")
+    assert parent.sent() == b"MV0210\r"
 
     parent.control = 3233
-    assert parent.connection.has_written("MV3233")
+    assert parent.sent() == b"MV3233\r"
 
 
 def test_volumecontrol():
-    class TestParent(object):
-        connection = MockReceiverConnection()
+    class TestParent(MockedConnectionReceiver):
         control = VolumeControl("MV")
 
-    parent = TestParent()
+    parent = TestParent("fakehost")
 
     parent.control = "+"
-    assert parent.connection.has_written("MVUP")
+    assert parent.sent() == b"MVUP\r"
 
     parent.control = "-"
-    assert parent.connection.has_written("MVDOWN")
+    assert parent.sent() == b"MVDOWN\r"
 
 
+@pytest_twisted.inlineCallbacks
 def test_enumcontrol():
     class TestEnum(Enum):
         Auto = "AUTO"
@@ -222,23 +252,27 @@ def test_enumcontrol():
         Digital = "DIGITAL"
 
 
-    class TestParent(object):
-        connection = MockReceiverConnection()
+    class TestParent(MockedConnectionReceiver):
         control = EnumControl("SD", enum_type=TestEnum)
 
-    parent = TestParent()
-    parent.connection.set_response("SD?", "SDAUTO")
-    assert parent.control == TestEnum.Auto
+    parent = TestParent("fakehost")
 
-    parent.connection.set_response("SD?", "SDHDMI")
-    assert parent.control == TestEnum.HDMI
+    parent.write_response(b"SDAUTO")
+    value = yield parent.control.addTimeout(1, reactor)
+    assert value == TestEnum.Auto
 
-    parent.connection.set_response("SD?", "SDDIGITAL")
-    assert parent.control == TestEnum.Digital
+    parent.write_response(b"SDHDMI")
+    value = yield parent.control.addTimeout(1, reactor)
+    assert value == TestEnum.HDMI
 
-    parent.connection.set_response("SD?", "SDNO")
-    with pytest.raises(StatusError):
-        assert parent.control == TestEnum.Auto
+    parent.write_response(b"SDDIGITAL")
+    value = yield parent.control.addTimeout(1, reactor)
+    assert value == TestEnum.Digital
+
+    parent.write_response(b"SDNO")
+    with pytest.raises(TimeoutError):
+        yield parent.control.addTimeout(1, reactor)
+    assert parent.sent() == b"SD?\r"
 
     parent.control = TestEnum.Auto
-    assert parent.connection.has_written("SDAUTO")
+    assert parent.sent() == b"SDAUTO\r"
