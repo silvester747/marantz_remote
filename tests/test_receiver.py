@@ -20,11 +20,21 @@ from marantz_remote.receiver import (Control, EnumControl, NumericControl, Recei
 
 
 class MockedConnectionReceiver(ReceiverBase):
-    def connect(self, host: str):
-        protocol = ReceiverProtocol(self)
+    test_connects_directly: bool = True
+
+    def __init__(self, host: str, timeout: int = 1):
+        super().__init__(host, timeout)
+        if self.test_connects_directly:
+            self.finish_connect()
+
+    def connect(self, host: str) -> Deferred:
         self.transport = StringTransportWithDisconnection()
+        return Deferred()
+
+    def finish_connect(self):
+        protocol = ReceiverProtocol(self)
         protocol.makeConnection(self.transport)
-        self._connected(protocol)
+        self.connected.callback(protocol)
 
     def write_response(self, msg):
         self.protocol.lineReceived(msg)
@@ -33,6 +43,78 @@ class MockedConnectionReceiver(ReceiverBase):
         data = self.transport.value()
         self.transport.clear()
         return data
+
+
+def test_receiverbase_connect_then_write():
+    class TestParent(MockedConnectionReceiver):
+        test_connects_directly = False
+
+    parent = TestParent("fakehost")
+    parent.finish_connect()
+    parent.write("Test")
+    assert parent.sent() == b"Test\r"
+
+
+def test_receiverbase_write_before_connect():
+    class TestParent(MockedConnectionReceiver):
+        test_connects_directly = False
+
+    parent = TestParent("fakehost")
+    parent.write("Test")
+    assert parent.sent() == b""
+
+    parent.finish_connect()
+    assert parent.sent() == b"Test\r"
+
+
+def test_receiverbase_multiple_writes_wait_for_each_response():
+    class TestParent(MockedConnectionReceiver):
+        test_connects_directly = False
+        control = Control("PW")
+
+    parent = TestParent("fakehost")
+    parent.finish_connect()
+    parent.write("Test")
+    parent.write("Test2")
+    parent.write("Test3")
+    assert parent.sent() == b"Test\r"
+
+    parent.write_response(b"Response")
+    assert parent.sent() == b"Test2\r"
+
+    parent.write_response(b"Response2")
+    assert parent.sent() == b"Test3\r"
+
+
+@pytest_twisted.inlineCallbacks
+def test_receiverbase_multiple_writes_with_no_response():
+    class TestParent(MockedConnectionReceiver):
+        test_connects_directly = False
+        control = Control("PW")
+
+    parent = TestParent("fakehost", 0.1)
+    parent.finish_connect()
+    parent.write("Test")
+    parent.write("Test2")
+    parent.write("Test3")
+    assert parent.sent() == b"Test\r"
+
+    def check():
+        assert parent.sent() == b"Test2\rTest3\r"
+    yield reactor.callLater(1.0, check)
+
+
+def test_receiverbase_multiple_writes_with_no_timeout():
+    class TestParent(MockedConnectionReceiver):
+        test_connects_directly = False
+        control = Control("PW")
+
+    parent = TestParent("fakehost", 0)
+    parent.finish_connect()
+    parent.write("Test")
+    parent.write("Test2")
+    parent.write("Test3")
+    assert parent.sent() == b"Test\rTest2\rTest3\r"
 
 
 @pytest_twisted.inlineCallbacks
@@ -167,6 +249,7 @@ def test_numericcontrol():
 
     parent.control = 4
     assert parent.sent() == b"MV04\r"
+    parent.write_response(b"MV04")
 
     parent.control = 38
     assert parent.sent() == b"MV38\r"
@@ -220,15 +303,19 @@ def test_numericcontrol__more_digits():
 
     parent.control = 4
     assert parent.sent() == b"MV0004\r"
+    parent.write_response(b"MV0004")
 
     parent.control = 38
     assert parent.sent() == b"MV0038\r"
+    parent.write_response(b"MV0038")
 
     parent.control = 210
     assert parent.sent() == b"MV0210\r"
+    parent.write_response(b"MV0210")
 
     parent.control = 3233
     assert parent.sent() == b"MV3233\r"
+    parent.write_response(b"MV3233")
 
 
 def test_volumecontrol():
@@ -239,9 +326,11 @@ def test_volumecontrol():
 
     parent.control = "+"
     assert parent.sent() == b"MVUP\r"
+    parent.write_response(b"MV31")
 
     parent.control = "-"
     assert parent.sent() == b"MVDOWN\r"
+    parent.write_response(b"MV30")
 
 
 @pytest_twisted.inlineCallbacks
@@ -273,6 +362,7 @@ def test_enumcontrol():
     with pytest.raises(TimeoutError):
         yield parent.control.addTimeout(1, reactor)
     assert parent.sent() == b"SD?\r"
+    parent.write_response(b"SDNO")
 
     parent.control = TestEnum.Auto
     assert parent.sent() == b"SDAUTO\r"

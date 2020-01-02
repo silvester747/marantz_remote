@@ -22,7 +22,7 @@ class NotConnectedError(Exception):
 
 
 class ReceiverProtocol(StatefulTelnetProtocol):
-    delimiter = b"\r"
+    delimiter: bytes = b"\r"
 
     receiver: "ReceiverBase"
 
@@ -40,27 +40,49 @@ class ReceiverBase(object):
     response_handlers: List[Tuple[Pattern, "Control"]]
     cached_values: MutableMapping[str, Any]
     protocol: Optional[ReceiverProtocol] = None
-    connected: Deferred
+    connected: Optional[Deferred] = None
+    pending_writes: List[str]
+    deferred_writer: Optional[Deferred] = None
+    timeout: int
 
     def __init__(self, host: str, timeout: int = 1):
         self.cached_values = {}
-        self.connect(host)
+        self.pending_writes = []
+        self.timeout = timeout
 
-    def connect(self, host: str):
+        self.connected = self.connect(host)
+        self.connected.addCallback(self._connected)
+        self.connected.addCallback(self._write_next)
+
+    def connect(self, host: str) -> Deferred:
         endpoint = TCP4ClientEndpoint(reactor, host, 23)
         protocol = ReceiverProtocol(self)
-        self.connected = connectProtocol(endpoint, protocol)
-        self.connected.addCallback(self._connected)
+        return connectProtocol(endpoint, protocol)
 
     def write(self, command: str) -> None:
-        if self.protocol is None:
-            raise NotConnectedError
+        self.pending_writes.append(command)
 
+        if self.deferred_writer is None:
+            self._write_next(None)
+
+    def _write_next(self, _):
+        if self.protocol is None:
+            return
+        if not self.pending_writes:
+            return
+
+        command = self.pending_writes.pop(0)
         self.protocol.sendLine(command.encode("ascii"))
 
+        if self.timeout > 0:
+            self.deferred_writer = Deferred()
+            self.deferred_writer.addTimeout(self.timeout, reactor)
+            self.deferred_writer.addCallback(self._write_next)
+            self.deferred_writer.addErrback(self._write_next)
+
     def _connected(self, protocol):
-        print("Connected!")
         self.protocol = protocol
+        self.connected = None
 
     def parse(self, line):
         handled = False
@@ -71,6 +93,9 @@ class ReceiverBase(object):
                 handled = True
         if not handled:
             print(f"Unhandled response: {line}", file=sys.stderr)
+        if self.deferred_writer:
+            self.deferred_writer, d = None, self.deferred_writer
+            d.callback(None)
 
 
 class Control(object):
@@ -79,6 +104,7 @@ class Control(object):
     response_prefix: str
     response_pattern: str
     set_command: str
+    deferreds: List[Deferred]
 
     def __init__(self, name: str, status_command: Optional[str] = None,
                  response_prefix: Optional[str] = None, set_command: Optional[str] = None):
@@ -116,7 +142,7 @@ class Control(object):
 
     def parse(self, instance, match):
         self.store_value(instance, match.group(1))
-    
+
     def store_value(self, instance, value):
         instance.cached_values[self.name] = value
         for d in self.deferreds:
