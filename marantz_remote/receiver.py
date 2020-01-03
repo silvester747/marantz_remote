@@ -10,7 +10,7 @@ from telnetlib import Telnet
 from typing import Any, List, Match, MutableMapping, Optional, Pattern, Tuple, Type
 
 from twisted.conch.telnet import StatefulTelnetProtocol
-from twisted.internet import reactor
+from twisted.internet import defer, reactor
 from twisted.internet.defer import Deferred
 from twisted.internet.protocol import Protocol
 from twisted.internet.endpoints import TCP4ClientEndpoint, connectProtocol
@@ -119,14 +119,14 @@ class Control(object):
         return f"{response_prefix}(.*)"
 
     def __get__(self, instance: ReceiverBase, owner=None) -> Deferred:
-        d = Deferred()
         value = instance.cached_values.get(self.name, None)
         if value:
-            d.callback(value)
+            return defer.succeed(value)
         else:
-            instance.write(self.status_command)
+            d = Deferred()
             self.deferreds.append(d)
-        return d
+            instance.write(self.status_command)
+            return d
 
     def __set__(self, instance: ReceiverBase, value: Any) -> None:
         instance.write(f"{self.set_command}{value}")
@@ -476,12 +476,12 @@ def test() -> None:
             if not name.startswith("_"):
                 attr = getattr(r, name)
                 if isinstance(attr, Deferred):
-                    attr.addTimeout(1, reactor).addCallback(print_value, name).addErrback(print_error, name)
+                    attr.addTimeout(10, reactor).addCallback(print_value, name).addErrback(print_error, name)
 
-        r.master_volume = "+"
-        print(r.master_volume)
-        r.master_volume = "-"
-        print(r.master_volume)
+        #r.master_volume = "+"
+        #print(r.master_volume)
+        #r.master_volume = "-"
+        #print(r.master_volume)
 
     r.connected.addCallback(run_test)
 
